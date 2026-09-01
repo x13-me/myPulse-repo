@@ -1,0 +1,139 @@
+name: Build os-mypulse
+
+on:
+  repository_dispatch:
+    types: [build_os_mypulse]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to build (tag, branch, commit)'
+        required: false
+        default: 'main'
+      version:
+        description: 'Package version (e.g., 0.2.3)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      pkg_path: ${{ steps.upload_artifact.outputs.pkg_path }}
+      pkg_sha256: ${{ steps.upload_artifact.outputs.pkg_sha256 }}
+      version: ${{ steps.determine_version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: determine_version
+        run: |
+          VERSION="${{ github.event.inputs.version || github.event.client_payload.version }}"
+          if [ -z "$VERSION" ]; then
+            # Extract from tag if available
+            if [[ "${{ github.event.inputs.ref }}" =~ ^refs/tags/v(.+)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            elif [[ "${{ github.event.client_payload.ref }}" =~ ^refs/tags/v(.+)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "ERROR: version not provided and cannot extract from ref" >&2
+              exit 1
+            fi
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Checkout upstream (pulse-agent-opnsense)
+        uses: actions/checkout@v4
+        with:
+          repository: ryanstead/pulse-agent-opnsense
+          token: ${{ secrets.UPSTREAM_PAT }}
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+          path: upstream
+
+      - name: Build on FreeBSD 15.1
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "15.1"
+          usesh: true
+          prepare: |
+            pkg install -y rust cargo git
+          run: |
+            cd upstream
+            ./build.sh
+
+      - name: Find and verify package
+        id: find_pkg
+        run: |
+          PKG=$(find upstream/releases -name 'os-mypulse-*.pkg' | head -1)
+          if [ -z "$PKG" ]; then
+            echo "ERROR: No package found in upstream/releases/" >&2
+            exit 1
+          fi
+          SHA256=$(sha256sum "$PKG" | awk '{print $1}')
+          echo "pkg_path=$PKG" >> $GITHUB_OUTPUT
+          echo "pkg_sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Upload package artifact
+        id: upload_artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-mypulse-${{ steps.determine_version.outputs.version }}
+          path: ${{ steps.find_pkg.outputs.pkg_path }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.ref != 'main'
+        with:
+          tag_name: v${{ steps.determine_version.outputs.version }}
+          name: os-mypulse ${{ steps.determine_version.outputs.version }}
+          files: ${{ steps.find_pkg.outputs.pkg_path }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare pkg repo directory
+        id: prepare_pkg_repo
+        run: |
+          mkdir -p pkg
+          cp ${{ steps.find_pkg.outputs.pkg_path }} pkg/os-mypulse-${{ steps.determine_version.outputs.version }}.pkg
+          sha256sum pkg/os-mypulse-${{ steps.determine_version.outputs.version }}.pkg > pkg/os-mypulse-${{ steps.determine_version.outputs.version }}.pkg.sha256
+          echo "pkg_dir=pkg" >> $GITHUB_OUTPUT
+
+      - name: Generate pkg repo metadata
+        run: |
+          cd ${{ steps.prepare_pkg_repo.outputs.pkg_dir }}
+          pkg repo .
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./pkg
+          destination_dir: /
+          keep_files: true
+          force_orphan: true
+
+  # Optional: Push to GitLab releases
+  push_to_gitlab:
+    needs: build
+    if: ${{ secrets.GITLAB_TOKEN != '' && github.event_name == 'repository_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: os-mypulse-${{ needs.build.outputs.version }}
+          path: .
+
+      - name: Push to GitLab release
+        run: |
+          PKG_FILE=$(find . -name 'os-mypulse-*.pkg' | head -1)
+          if [ -z "$PKG_FILE" ]; then exit 1; fi
+          curl --header "JOB-TOKEN: ${{ secrets.GITLAB_TOKEN }}" \
+            --header "Content-Type: application/octet-stream" \
+            --data-binary @"$PKG_FILE" \
+            "https://gitlab.com/api/v4/projects/ryanstead%2Fpulse-agent-opnsense/packages/generic/os-mypulse/${{ needs.build.outputs.version }}/$(basename $PKG_FILE)"

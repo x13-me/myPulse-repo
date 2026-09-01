@@ -1,0 +1,7 @@
+{
+  "event_type": "build_os_mypulse",
+  "client_payload": {
+    "ref": "v0.2.3",
+    "version": "0.2.3"
+  }
+}
