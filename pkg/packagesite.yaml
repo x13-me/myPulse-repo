@@ -1,0 +1,44 @@
+packages:
+  os-mypulse:
+    name: os-mypulse
+    origin: sysutils/os-mypulse
+    version: 0.2.3
+    comment: Olilo myPulse monitoring agent
+    desc: Native OPNsense integration for the Olilo myPulse monitoring agent.
+    maintainer: ryanstead@gitlab.com
+    www: https://gitlab.com/ryanstead/pulse-agent-opnsense
+    abi: FreeBSD:15:amd64
+    arch: freebsd:15:x86:64
+    prefix: /
+    flatsize: 9342933
+    licenses:
+      - MIT
+    comment: Olilo myPulse monitoring agent
+    shlibs_required:
+      - libc.so.7
+      - libgcc_s.so.1
+      - libm.so.5
+      - libthr.so.3
+    annotations:
+      FreeBSD_version: 1501000
+    licenses:
+      - MIT
+    files:
+      /+POST_INSTALL: {sum: 1$181112db910e1c1228a254e88c5831c195205727e763dc25b2d0c910d256bc0b, uname: root, gname: wheel, perm: 0755}
+    scripts:
+      post-install: |-
+        #!/bin/sh
+
+        REPO_CONF="/usr/local/etc/pkg/repos/myPulse.conf"
+
+        cat > "$REPO_CONF" <<'EOC'
+myPulse: {
+  url: "https://github.x13.me/myPulse-repo/pkg",
+  enabled: yes,
+  priority: 20,
+  signature_type: "none"
+}
+EOC
+
+        echo "Added myPulse pkg repository configuration to $REPO_CONF"
+        echo "Run 'pkg update' to refresh the package catalog."
